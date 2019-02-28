@@ -35,7 +35,8 @@
 *
 *  ToDo:      figure out why forecast page header anti-aliasing isn't working
 *
-*   Maybe:    Switch API to one that includes POP value
+*   Maybe:    Switch API to one that includes chance of rain value
+              switch graphics display to use the TFT_eFEX library
 *
 */
 
@@ -155,7 +156,7 @@ void infiniteLoop() {
 }
 
 void tftMessage(char* theMessage) {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(TFT_RED);
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE);
   tft.setCursor(0,0);
@@ -662,7 +663,7 @@ void setup() {
   Serial.println(F("\r\nTFT Weather"));
   tft.init(INITR_BLACKTAB);
   tft.setRotation(TFT_ROTATION);
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(TFT_RED);
 
   tftMessage("TFT Weather");
 
