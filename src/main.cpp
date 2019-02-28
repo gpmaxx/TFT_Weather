@@ -33,10 +33,9 @@
 *              looking right. A different size screen the values will have to
 *              be changed carefully.
 *
-*  ToDo:      Add humidex calculation
-              switch to control units
-
-*
+*  ToDo:      
+              single query for today and tomorrow forecast
+              hold query data so requery is not required
 *
 *   Maybe:    Switch API to one that includes POP value
 *             move humidex to spiffs or progmmem
@@ -86,6 +85,7 @@ String queryString;
 char friendlyDate[12];             // date buffer format: Mon, Jan 23
 char friendlyTime[8];              // time buffer format: 12:34pm
 bool detailedMode = false;
+volatile bool switchInterrupted = false;  // flag to indicate weather data should be queriedd
 
 uint8_t humidexTable[19][29] =
 {{16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44},
@@ -114,7 +114,6 @@ enum WeatherType {EMPTY,CURRENT,FORECAST_TODAY,FORECAST_TOMORROW};
 
 struct WeatherData {
     WeatherType type;
-    bool isMetric;
     uint8_t conditionID;
     char description[20];
     char icon[8];
@@ -191,6 +190,7 @@ void wifiConnect() {
 
 void ledSwitchInterrupt() {
     Serial.println("switch interrupt");
+    switchInterrupted = true;
 }
 
 
@@ -295,34 +295,25 @@ void clearWeather(WeatherData* theWeather) {
   theWeather->sunset = 0;
 }
 
-void printTempUnits(const bool isMetric) {
-    if (isMetric) {
-      Serial.println("°C");
-    }
-    else {
-      Serial.println("°F");
-    }
+float MPSToKPH(const float valueMPS) {
+  return valueMPS * 3.6;
 }
 
-void printWind(const float windspeed, const bool isMetric) {
-    Serial.print("Windspeed: ");
-    if (isMetric) {
-        Serial.print(windspeed * 3.6F); // m/s -> km/h conversion
-        Serial.println("kph");
-    }
-    else {
-
-      Serial.print(windspeed);
-      Serial.println("mph");
-    }
+float KPHToMPH(const float valueKPH) {
+  return valueKPH / 1.6;
 }
 
+int16_t roundInt(const float value) {
+  return ((int32_t)round(value));
+}
 
+float CToF(const float valueInC) {
+  return (valueInC * 1.8) + 32;
+}
 
 void printWeather(WeatherData* theWeather) {
   time_t t;
   Serial.printf("Type: %d\r\n",theWeather->type);
-  Serial.printf("Units: %s\r\n",(theWeather->isMetric) ? "Metric" : "Imperial");\
   t = tz.toLocal(theWeather->timestamp);
   Serial.printf("Date: %d-%02d-%02d\r\n",year(t),month(t),day(t));
   setFriendlyTime(friendlyTime,sizeof(friendlyTime),t);
@@ -331,18 +322,13 @@ void printWeather(WeatherData* theWeather) {
   Serial.printf("Icon: %s\r\n",theWeather->icon);
   Serial.printf("Pressure: %d\r\n",theWeather->pressure);
   Serial.printf("Humidity: %d%s\r\n",theWeather->humidity,"%");
-  Serial.print("Temp: ");
-  Serial.print(theWeather->temp);
-  printTempUnits(theWeather->isMetric);
+  Serial.printf("Temp: %.1f°C (%.1f°F)\r\n",theWeather->temp,CToF(theWeather->temp));
+
   if ((theWeather->type == FORECAST_TODAY) || (theWeather->type == FORECAST_TOMORROW)) {
-    Serial.print("Day Min Temp: ");
-    Serial.print(theWeather->tempMin);
-    printTempUnits(theWeather->isMetric);
-    Serial.print("Day Max Temp: ");
-    Serial.print(theWeather->tempMax);
-    printTempUnits(theWeather->isMetric);
+    Serial.printf("Day Min Temp: %.1f°C (%.1f°F)\r\n",theWeather->tempMin,CToF(theWeather->tempMin));
+    Serial.printf("Day Min Temp: %.1f°C (%.1f°F)\r\n",theWeather->tempMax,CToF(theWeather->tempMax));
   }
-  printWind(theWeather->windSpeed,theWeather->isMetric);
+  Serial.printf("Windspeed: %.2fkph (%.2fmph)\r\n",theWeather->windSpeed,KPHToMPH(theWeather->windSpeed));
   if (theWeather->type == CURRENT) {
     t = tz.toLocal(theWeather->sunrise);
     setFriendlyTime(friendlyTime,sizeof(friendlyTime),t);
@@ -353,13 +339,7 @@ void printWeather(WeatherData* theWeather) {
   }
 }
 
-float FToC(float valueInF) {
-  return (valueInF - 32) * .55555;
-}
 
-float CToF(float valueInC) {
-  return (valueInC * 1.8) + 32;
-}
 
 // return the humidex or windchill for the provided weather conditions
 // humidex is approximate based on approximate dewpoint
@@ -369,51 +349,56 @@ int16_t feelsLike(WeatherData* theWeather) {
   float result;
   uint8_t dewPoint;
 
-  if (theWeather->isMetric) {
+  Serial.println("Feels like");
 
-    if ((theWeather->temp <= 10) && (theWeather->windSpeed > 4.8)) {
-        result = pow(theWeather->windSpeed,0.16) * ((0.3965 * theWeather->temp) - 11.37);
-        result += 13.12;
-        result += (0.6215 * theWeather->temp);
-    }
-    else {
-        dewPoint = round(theWeather->temp - ((100 - theWeather->humidity)/5));
-        if ((dewPoint >= 10) && (dewPoint <= 28) && (theWeather->temp >= 15) &&  (theWeather->temp <= 43)) {
-            result =  humidexTable[dewPoint - 10][round(theWeather->temp - 15)];
-        }
-        else {
-          result = theWeather->temp;
-        }
-
-
-    }
+  if ((theWeather->temp <= 10) && (theWeather->windSpeed > 4.8)) {
+    result = pow(theWeather->windSpeed,0.16) * ((0.3965 * theWeather->temp) - 11.37);
+    result += 13.12;
+    result += (0.6215 * theWeather->temp);
   }
   else {
-    if ((theWeather->temp <= 50 )  && (theWeather->windSpeed > 3 )) {
-        result = pow(theWeather->temp,0.16) * ((0.4275 * theWeather->temp) - 35.75);
-        result += 35.74;
-        result += (0.6215 * theWeather->temp);
+    dewPoint = roundInt(theWeather->temp - ((100 - theWeather->humidity)/5));
+    if ((dewPoint >= 10) && (dewPoint <= 28) && (theWeather->temp >= 15) &&  (theWeather->temp <= 43)) {
+      result =  humidexTable[dewPoint - 10][roundInt(theWeather->temp - 15)];
     }
     else {
-      uint8_t tempC = FToC(theWeather->temp);
-      dewPoint = round(tempC - ((100 - theWeather->humidity)/5));
-      if ((dewPoint >= 10) && (dewPoint <= 28) && (tempC >= 15) &&  (tempC <= 43)) {
-          result =  CToF(humidexTable[dewPoint - 10][round(tempC - 15)]);
-      }
-      else {
-        result = theWeather->temp;
-      }
-
+      result = theWeather->temp;
     }
-
   }
 
-  return round(result);
+  Serial.printf("Temp: %.1f\r\n",theWeather->temp);
+  Serial.printf("Wind: %.2f\r\n",theWeather->windSpeed);
+  Serial.printf("Float result: %.1f\r\n",result);
+  int16_t r = roundInt(result);
+  Serial.printf("int result: %d\r\n",r);
+  return r;
+}
+
+void displayBigTemp(int16_t theTemp) {
+  tft.loadFont("Consolas-64");
+
+  Serial.print("displayBig: ");
+  Serial.println(theTemp);
+
+  uint8_t x = 110;
+  if (abs(theTemp) >= 10) {
+    x = 80;
+  }
+  if (theTemp < 0) {
+    x -= 30;
+  }
+
+  tft.setCursor(x,35);
+
+  tft.print(theTemp);
+  //tft.print("°");
+  tft.unloadFont();
 }
 
 void displayUpdate(WeatherData* theWeather) {
   char filepath[15];
   char tBuffer[20];
+  bool isMetric = digitalRead(SWITCH_PIN_1);
 
   tft.fillScreen(TFT_WHITE);
   tft.setTextColor(TFT_BLACK,TFT_WHITE);
@@ -426,16 +411,17 @@ void displayUpdate(WeatherData* theWeather) {
       tft.setTextColor(TFT_BLACK);
       tft.setCursor(0,0);
 
-      tft.println("Date: Most Recent");
+      tft.println("Data: Most Recent");
       setFriendlyDate(friendlyDate,sizeof(friendlyDate),tz.toLocal(theWeather->timestamp));
       tft.printf("Date: %s\n",friendlyDate);
       setFriendlyTime(friendlyTime,sizeof(friendlyTime),tz.toLocal(theWeather->timestamp));
       tft.printf("Time: %s\n",friendlyTime);
-      tft.printf("Temp: %d%s\n",round(theWeather->temp),(theWeather->isMetric) ? "C" : "F");
+      tft.printf("Temp: %d%s\n",(isMetric) ? roundInt(theWeather->temp) : roundInt(CToF(theWeather->temp)),(isMetric) ? "C" : "F");
       tft.printf("Desc: %s\n",theWeather->description);
       tft.printf("Hum:  %d%%\n",theWeather->humidity);
-      tft.printf("Wind: %d%s\n",round(theWeather->windSpeed),(theWeather->isMetric) ? "kph":"mph");
-      tft.printf("Feel: %d%s\n",feelsLike(theWeather),(theWeather->isMetric) ? "C" : "F");
+      tft.printf("Wind: %d%s\n",(isMetric) ? roundInt(theWeather->windSpeed) : roundInt(KPHToMPH(theWeather->windSpeed)),(isMetric) ? "kph":"mph");
+      int16_t feel = (isMetric) ? feelsLike(theWeather) : CToF(feelsLike(theWeather));
+      tft.printf("Feel: %d%s\r\n",feel,(isMetric) ? "C" : "F");
       setFriendlyTime(friendlyTime,sizeof(friendlyTime),theWeather->sunrise);
       tft.printf("Rise: %s\n",friendlyTime);
       setFriendlyTime(friendlyTime,sizeof(friendlyTime),theWeather->sunset);
@@ -443,9 +429,8 @@ void displayUpdate(WeatherData* theWeather) {
     }
     else {
       snprintf(filepath,sizeof(filepath),"%s%s%s","/icons/",theWeather->icon,".bmp");
-      drawBmp(&tft,filepath,10,30);
-      snprintf(tBuffer,sizeof(tBuffer),"%d",round(theWeather->temp));
-      tft.drawString(tBuffer,TFT_WIDTH_THREEQUATERS - (tft.textWidth(tBuffer,7)/2),30,7);
+      drawBmp(&tft,filepath,5,30);
+      displayBigTemp((isMetric) ? roundInt(theWeather->temp) : roundInt(CToF(theWeather->temp)));
       setFriendlyTime(friendlyTime,sizeof(friendlyTime),now());
       tft.drawString(friendlyTime,TFT_WIDTH_HALF - (tft.textWidth(friendlyTime,4)/2),90,4);
     }
@@ -459,20 +444,21 @@ void displayUpdate(WeatherData* theWeather) {
 
     if (detailedMode) {
       if (theWeather->type == FORECAST_TODAY) {
-        tft.println("Date: Today");
+        tft.println("Data: Today");
       }
       else {
-        tft.println("Date: Tomorrow");
+        tft.println("Data: Tomorrow");
       }
 
       setFriendlyDate(friendlyDate,sizeof(friendlyDate),theWeather->timestamp);
       tft.printf("Date: %s\n",friendlyDate);
-      tft.printf("Min:  %d%s\n",round(theWeather->tempMin),(theWeather->isMetric) ? "C" : "F");
-      tft.printf("Max:  %d%s\n",round(theWeather->tempMax),(theWeather->isMetric) ? "C" : "F");
+      tft.printf("Min:  %d%s\n",(isMetric) ? roundInt(theWeather->tempMin) : roundInt(CToF(theWeather->tempMin)),(isMetric) ? "C" : "F");
+      tft.printf("Max:  %d%s\n",(isMetric) ? roundInt(theWeather->tempMax) : roundInt(CToF(theWeather->tempMax)),(isMetric) ? "C" : "F");
       tft.printf("Desc: %s\n",theWeather->description);
       tft.printf("Hum:  %d%%\n",theWeather->humidity);
-      tft.printf("Wind: %d%s\n",round(theWeather->windSpeed),(theWeather->isMetric) ? "kph":"mph");
-      tft.printf("Feel: %d%s",feelsLike(theWeather),(theWeather->isMetric) ? "C" : "F");
+      tft.printf("Wind: %d%s\n",(isMetric) ? roundInt(theWeather->windSpeed) : roundInt(KPHToMPH(theWeather->windSpeed)),(isMetric) ? "kph":"mph");
+      int16_t feel = (isMetric) ? feelsLike(theWeather) : CToF(feelsLike(theWeather));
+      tft.printf("Feel: %d%s\r\n",feel,(isMetric) ? "C" : "F");
     }
     else {
       if (theWeather->type == FORECAST_TODAY) {
@@ -483,9 +469,9 @@ void displayUpdate(WeatherData* theWeather) {
       }
       snprintf(filepath,sizeof(filepath),"%s%s%s","/icons/",theWeather->icon,".bmp");
       drawBmp(&tft,filepath,10,30);
-      snprintf(tBuffer,sizeof(tBuffer),"Min: %d",round(theWeather->tempMin));
+      snprintf(tBuffer,sizeof(tBuffer),"Min: %d",(isMetric) ? roundInt(theWeather->tempMin) : roundInt(CToF(theWeather->tempMin)));
       tft.drawString(tBuffer,100,35,2);
-      snprintf(tBuffer,sizeof(tBuffer),"Max: %d",round(theWeather->tempMax));
+      snprintf(tBuffer,sizeof(tBuffer),"Max: %d",(isMetric) ? roundInt(theWeather->tempMax) : roundInt(CToF(theWeather->tempMax)));
       tft.drawString(tBuffer,100,55,2);
       snprintf(tBuffer,sizeof(tBuffer),"%s",theWeather->description);
       tft.drawString(tBuffer,TFT_WIDTH_HALF - (tft.textWidth(tBuffer,2)/2),90,2);
@@ -494,17 +480,10 @@ void displayUpdate(WeatherData* theWeather) {
 
 }
 
-void getCurrentWeather(const String cityID, const bool isMetric, WeatherData* theWeather) {
+void getCurrentWeather(const String cityID, WeatherData* theWeather) {
   Serial.println(F("Fetching weather"));
   if (client.connect(SERVER_NAME, 80)) {  //starts client connection, checks for connection
-    queryString = "GET /data/2.5/weather?id=" + cityID + "&units=";
-    if (!isMetric) {
-      queryString += "imperial";
-    }
-    else
-    {
-      queryString += "metric";
-    }
+    queryString = "GET /data/2.5/weather?id=" + cityID + "&units=metric";
     queryString += "&cnt=2&APPID=" + API_KEY + "\r\n";
     Serial.print(queryString);
     queryString += "Host: ";
@@ -551,7 +530,6 @@ void getCurrentWeather(const String cityID, const bool isMetric, WeatherData* th
   JsonObject& weather_0 = root["weather"][0];
   clearWeather(theWeather);
   theWeather->type = CURRENT;
-  theWeather->isMetric = isMetric;
   theWeather->conditionID = weather_0["id"];
   const char* cond = weather_0["description"];
   strncpy(theWeather->description,cond,sizeof(theWeather->description));
@@ -562,7 +540,7 @@ void getCurrentWeather(const String cityID, const bool isMetric, WeatherData* th
   theWeather->temp = main["temp"];
   theWeather->pressure = main["pressure"];
   theWeather->humidity = main["humidity"];
-  theWeather->windSpeed = root["wind"]["speed"];
+  theWeather->windSpeed = MPSToKPH(root["wind"]["speed"]);
   theWeather->timestamp = root["dt"];
   theWeather->sunrise = root["sys"]["sunrise"];
   theWeather->sunrise = tz.toLocal(theWeather->sunrise);
@@ -570,23 +548,15 @@ void getCurrentWeather(const String cityID, const bool isMetric, WeatherData* th
   theWeather->sunset = tz.toLocal(theWeather->sunset);
 
   printWeather(theWeather);
-
-
 }
 
-void getForecastWeather(const String cityID, const bool isMetric, const bool forToday, WeatherData* theWeather)
+
+void getForecastWeather(const String cityID,  const bool forToday, WeatherData* theWeather)
 {
 
   Serial.println(F("Getting Weather Data"));
   if (client.connect(SERVER_NAME, 80)) {  //starts client connection, checks for connection
-    queryString = "GET /data/2.5/forecast/daily?id=" + cityID + "&units=";
-    if (isMetric) {
-      queryString += "metric";
-    }
-    else
-    {
-      queryString += "imperial";
-    }
+    queryString = "GET /data/2.5/forecast/daily?id=" + cityID + "&units=metric";
     queryString += "&cnt=2&APPID=" + API_KEY + "\r\n";
     queryString += "Host: ";
     queryString += SERVER_NAME;
@@ -639,7 +609,7 @@ void getForecastWeather(const String cityID, const bool isMetric, const bool for
   else {
     theWeather->type = FORECAST_TOMORROW;
   }
-  theWeather->isMetric = isMetric;
+
   JsonObject&  listEntry = list[index];
   JsonObject& weather = listEntry["weather"][0];
   const char* cond = weather["description"];
@@ -651,11 +621,23 @@ void getForecastWeather(const String cityID, const bool isMetric, const bool for
   theWeather->temp = listEntry["temp"]["day"];
   theWeather->tempMin = listEntry["temp"]["min"];
   theWeather->tempMax = listEntry["temp"]["max"];
-  theWeather->windSpeed = listEntry["speed"];
+  theWeather->windSpeed = MPSToKPH(listEntry["speed"]);
   theWeather->timestamp = listEntry["dt"];
 
   printWeather(theWeather);
 
+}
+
+void getCurrentWeather() {
+    getCurrentWeather(CITY_ID,&currentWeather);
+}
+
+void getForecastToday() {
+  getForecastWeather(CITY_ID,true,&currentWeather);
+}
+
+void getForecastTomorrow() {
+  getForecastWeather(CITY_ID,false,&currentWeather);
 }
 
 void setup() {
@@ -691,7 +673,6 @@ void setup() {
 
   updateTime();
 
-
 }
 
 void loop() {
@@ -701,7 +682,8 @@ void loop() {
   static uint32_t buttonTimer;
   static WeatherType currentMode = CURRENT;
 
-  bool shouldQuery = firstrun;
+  bool shouldQuery = firstrun || switchInterrupted;
+  switchInterrupted = false;
   bool shouldUpdate = false;
 
   debouncer.update();
@@ -740,13 +722,13 @@ void loop() {
       tft.fillScreen(TFT_WHITE);
       tft.drawString("Querying...",0,0,2);
       case CURRENT:
-        getCurrentWeather(CITY_ID,false,&currentWeather);
+        getCurrentWeather();
         break;
       case FORECAST_TODAY:
-        getForecastWeather(CITY_ID,false,true,&currentWeather);
+        getForecastToday();
         break;
       case FORECAST_TOMORROW:
-        getForecastWeather(CITY_ID,false,false,&currentWeather);
+        getForecastTomorrow();
         break;
     }
     lastUpdateTime = millis();
