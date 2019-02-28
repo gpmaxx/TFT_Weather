@@ -33,12 +33,11 @@
 *              looking right. A different size screen the values will have to
 *              be changed carefully.
 *
-*  ToDo:      
-              single query for today and tomorrow forecast
-              hold query data so requery is not required
+*  ToDo:
+              clean up fonts and graphics screens
 *
 *   Maybe:    Switch API to one that includes POP value
-*             move humidex to spiffs or progmmem
+*             
 */
 
 #include <Arduino.h>
@@ -137,7 +136,6 @@ WiFiManager wifiManager;
 TFT_eSPI tft = TFT_eSPI();
 Bounce debouncer = Bounce();
 WiFiClient client;
-WeatherData currentWeather;
 TimeChangeRule usEDT = {"EDT", Second, Sun, Mar, 2, -240};  //UTC - 4 hours
 TimeChangeRule usEST = {"EST", First, Sun, Nov, 2, -300};   //UTC - 5 hours
 Timezone tz(usEDT, usEST);
@@ -313,7 +311,21 @@ float CToF(const float valueInC) {
 
 void printWeather(WeatherData* theWeather) {
   time_t t;
-  Serial.printf("Type: %d\r\n",theWeather->type);
+  Serial.println("-------------------------------");
+  Serial.print("Type: ");
+  if (theWeather->type == CURRENT) {
+    Serial.println("Current");
+  }
+  else if (theWeather->type == FORECAST_TODAY) {
+    Serial.println("Today's forecast");
+  }
+  else if (theWeather->type == FORECAST_TOMORROW) {
+    Serial.println("Tomorrow's Forecast");
+  }
+  else {
+    Serial.println("Unknown");
+  }
+  Serial.println("-------------------------------");
   t = tz.toLocal(theWeather->timestamp);
   Serial.printf("Date: %d-%02d-%02d\r\n",year(t),month(t),day(t));
   setFriendlyTime(friendlyTime,sizeof(friendlyTime),t);
@@ -337,6 +349,7 @@ void printWeather(WeatherData* theWeather) {
     setFriendlyTime(friendlyTime,sizeof(friendlyTime),t);
     Serial.printf("Sunset: %s\r\n",friendlyTime);
   }
+  Serial.println("-------------------------------");
 }
 
 
@@ -377,9 +390,6 @@ int16_t feelsLike(WeatherData* theWeather) {
 void displayBigTemp(int16_t theTemp) {
   tft.loadFont("Consolas-64");
 
-  Serial.print("displayBig: ");
-  Serial.println(theTemp);
-
   uint8_t x = 110;
   if (abs(theTemp) >= 10) {
     x = 80;
@@ -399,6 +409,7 @@ void displayUpdate(WeatherData* theWeather) {
   char filepath[15];
   char tBuffer[20];
   bool isMetric = digitalRead(SWITCH_PIN_1);
+  Serial.println("updating display");
 
   tft.fillScreen(TFT_WHITE);
   tft.setTextColor(TFT_BLACK,TFT_WHITE);
@@ -481,7 +492,7 @@ void displayUpdate(WeatherData* theWeather) {
 }
 
 void getCurrentWeather(const String cityID, WeatherData* theWeather) {
-  Serial.println(F("Fetching weather"));
+  Serial.println(F("Fetching current weather"));
   if (client.connect(SERVER_NAME, 80)) {  //starts client connection, checks for connection
     queryString = "GET /data/2.5/weather?id=" + cityID + "&units=metric";
     queryString += "&cnt=2&APPID=" + API_KEY + "\r\n";
@@ -551,7 +562,7 @@ void getCurrentWeather(const String cityID, WeatherData* theWeather) {
 }
 
 
-void getForecastWeather(const String cityID,  const bool forToday, WeatherData* theWeather)
+void getForecastWeather(const String cityID,  WeatherData* todays, WeatherData* tomorrows)
 {
 
   Serial.println(F("Getting Weather Data"));
@@ -600,44 +611,34 @@ void getForecastWeather(const String cityID,  const bool forToday, WeatherData* 
   }
 
   JsonArray &list = root["list"];
-  uint8_t index = forToday ? 0 : 1;
+  WeatherData* theData[2];
 
-  clearWeather(theWeather);
-  if (forToday) {
-    theWeather->type = FORECAST_TODAY;
+  clearWeather(todays);
+  clearWeather(tomorrows);
+  todays->type = FORECAST_TODAY;
+  tomorrows->type = FORECAST_TOMORROW;
+  theData[0] = todays;
+  theData[1] = tomorrows;
+
+  uint8_t counter = 0;
+  for (auto& listEntry : list) {
+    const char* cond = listEntry["weather"][0]["description"];
+    strncpy(theData[counter]->description,cond,sizeof(theData[counter]->description));
+    const char* icon = listEntry["weather"][0]["icon"];
+    strncpy(theData[counter]->icon,icon,sizeof(theData[counter]->icon));
+    theData[counter]->pressure = listEntry["pressure"];
+    theData[counter]->humidity = listEntry["humidity"];
+    theData[counter]->temp = listEntry["temp"]["day"];
+    theData[counter]->tempMin = listEntry["temp"]["min"];
+    theData[counter]->tempMax = listEntry["temp"]["max"];
+    theData[counter]->windSpeed = MPSToKPH(listEntry["speed"]);
+    theData[counter]->timestamp = listEntry["dt"];
+
+    printWeather(theData[counter]);
+    counter++;
+
   }
-  else {
-    theWeather->type = FORECAST_TOMORROW;
-  }
 
-  JsonObject&  listEntry = list[index];
-  JsonObject& weather = listEntry["weather"][0];
-  const char* cond = weather["description"];
-  strncpy(theWeather->description,cond,sizeof(theWeather->description));
-  const char* icon = weather["icon"];
-  strncpy(theWeather->icon,icon,sizeof(icon));
-  theWeather->pressure = listEntry["pressure"];
-  theWeather->humidity = listEntry["humidity"];
-  theWeather->temp = listEntry["temp"]["day"];
-  theWeather->tempMin = listEntry["temp"]["min"];
-  theWeather->tempMax = listEntry["temp"]["max"];
-  theWeather->windSpeed = MPSToKPH(listEntry["speed"]);
-  theWeather->timestamp = listEntry["dt"];
-
-  printWeather(theWeather);
-
-}
-
-void getCurrentWeather() {
-    getCurrentWeather(CITY_ID,&currentWeather);
-}
-
-void getForecastToday() {
-  getForecastWeather(CITY_ID,true,&currentWeather);
-}
-
-void getForecastTomorrow() {
-  getForecastWeather(CITY_ID,false,&currentWeather);
 }
 
 void setup() {
@@ -678,13 +679,16 @@ void setup() {
 void loop() {
   static int8_t prevMin = minute(now());
   static bool firstrun = true;
-  static uint32_t lastUpdateTime;
+  static uint32_t lastUpdateTime = millis();
   static uint32_t buttonTimer;
   static WeatherType currentMode = CURRENT;
+  static WeatherData weatherCurrent;
+  static WeatherData weatherForecastToday;
+  static WeatherData weatherForecastTomorrow;
 
-  bool shouldQuery = firstrun || switchInterrupted;
+  bool shouldQuery = firstrun;
+  bool shouldUpdate = switchInterrupted;
   switchInterrupted = false;
-  bool shouldUpdate = false;
 
   debouncer.update();
   if (debouncer.fell()) {
@@ -693,13 +697,12 @@ void loop() {
   }
   if (debouncer.rose()) {
     Serial.println("rose");
+    shouldUpdate = true;
     if ((millis() - buttonTimer) > LONG_PRESS_THRESHOLD) {
       detailedMode = !detailedMode;
-      shouldUpdate = true;
     }
     else {
       switch (currentMode) {
-        shouldQuery = true;
         case CURRENT:
           currentMode = FORECAST_TODAY;
           break;
@@ -710,37 +713,34 @@ void loop() {
           currentMode = CURRENT;
           break;
        }
-       shouldQuery = true;
     }
   }
-
   if ((millis() - lastUpdateTime) > DISPLAY_UPDATE_INTERVAL) {
     shouldQuery = true;
   }
-  if (shouldQuery) {
-    switch(currentMode) {
-      tft.fillScreen(TFT_WHITE);
-      tft.drawString("Querying...",0,0,2);
-      case CURRENT:
-        getCurrentWeather();
-        break;
-      case FORECAST_TODAY:
-        getForecastToday();
-        break;
-      case FORECAST_TOMORROW:
-        getForecastTomorrow();
-        break;
-    }
-    lastUpdateTime = millis();
-    shouldUpdate = true;
-
-  }
-  if ((currentWeather.type == CURRENT) && (prevMin != minute(now()))) {
+  if ((currentMode == CURRENT) && (prevMin != minute(now()))) {
     prevMin = minute(now());
     shouldUpdate = true;
   }
+  if (shouldQuery) {
+    getCurrentWeather(CITY_ID,&weatherCurrent);
+    getForecastWeather(CITY_ID,&weatherForecastToday, &weatherForecastTomorrow);
+    lastUpdateTime = millis();
+    shouldUpdate = true;
+  }
+
   if (shouldUpdate) {
-    displayUpdate(&currentWeather);
+    switch(currentMode) {
+      case CURRENT:
+        displayUpdate(&weatherCurrent);
+        break;
+      case FORECAST_TODAY:
+        displayUpdate(&weatherForecastToday);
+        break;
+      case FORECAST_TOMORROW:
+        displayUpdate(&weatherForecastTomorrow);
+        break;
+    }
     firstrun = false;
   }
 
