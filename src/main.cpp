@@ -33,11 +33,10 @@
 *              looking right. A different size screen the values will have to
 *              be changed carefully.
 *
-*  ToDo:
-              clean up fonts and graphics screens
+*  ToDo:      figure out why forecast page header anti-aliasing isn't working
 *
 *   Maybe:    Switch API to one that includes POP value
-*             
+*
 */
 
 #include <Arduino.h>
@@ -79,6 +78,9 @@ const uint8_t TFT_WIDTH_QUATER = 40;
 const uint8_t TFT_WIDTH_HALF = 80;
 const uint8_t TFT_WIDTH_THREEQUATERS = 120;
 const uint16_t TFT_HALF_HEIGHT = 64;
+
+const char* LARGE_FONT = "Consolas-48";
+const char* MEDIUM_FONT = "Consolas-28";
 ///////////// Global Variables ////////////
 String queryString;
 char friendlyDate[12];             // date buffer format: Mon, Jan 23
@@ -134,6 +136,8 @@ struct WeatherData {
 /////////// Global Object Variables ///////////
 WiFiManager wifiManager;
 TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite spr = TFT_eSprite(&tft);
+
 Bounce debouncer = Bounce();
 WiFiClient client;
 TimeChangeRule usEDT = {"EDT", Second, Sun, Mar, 2, -240};  //UTC - 4 hours
@@ -388,25 +392,36 @@ int16_t feelsLike(WeatherData* theWeather) {
 }
 
 void displayBigTemp(int16_t theTemp) {
-  tft.loadFont("Consolas-64");
-
-  uint8_t x = 110;
-  if (abs(theTemp) >= 10) {
-    x = 80;
-  }
-  if (theTemp < 0) {
-    x -= 30;
-  }
-
-  tft.setCursor(x,35);
-
-  tft.print(theTemp);
-  //tft.print("°");
+  tft.loadFont(LARGE_FONT);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawNumber(theTemp,150,35);
   tft.unloadFont();
 }
 
-void displayUpdate(WeatherData* theWeather) {
+void displayHeading(const char* headingText) {
+  tft.loadFont(MEDIUM_FONT);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString(headingText,TFT_WIDTH_HALF,5);
+  tft.unloadFont();
+}
+
+void displayTime() {
+  tft.loadFont(MEDIUM_FONT);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_BLACK,TFT_WHITE);
+  setFriendlyTime(friendlyTime,sizeof(friendlyTime),now());
+  tft.drawString(friendlyTime,80,110);
+  tft.unloadFont();
+}
+
+void displayBMP(const char* iconName) {
   char filepath[15];
+  snprintf(filepath,sizeof(filepath),"%s%s%s","/icons/",iconName,".bmp");
+  drawBmp(&tft,filepath,5,35);
+}
+
+void displayUpdate(WeatherData* theWeather) {
+
   char tBuffer[20];
   bool isMetric = digitalRead(SWITCH_PIN_1);
   Serial.println("updating display");
@@ -415,7 +430,7 @@ void displayUpdate(WeatherData* theWeather) {
   tft.setTextColor(TFT_BLACK,TFT_WHITE);
 
   if (theWeather->type == CURRENT) {
-    tft.drawString(friendlyDate,TFT_WIDTH_HALF - (tft.textWidth(friendlyDate,4)/2),2,4);
+
     if (detailedMode) {
       tft.setTextSize(1);
       tft.fillScreen(TFT_WHITE);
@@ -439,11 +454,10 @@ void displayUpdate(WeatherData* theWeather) {
       tft.printf("Set:  %s\n",friendlyTime);
     }
     else {
-      snprintf(filepath,sizeof(filepath),"%s%s%s","/icons/",theWeather->icon,".bmp");
-      drawBmp(&tft,filepath,5,30);
+      displayHeading(friendlyDate);
+      displayBMP(theWeather->icon);
+      displayTime();
       displayBigTemp((isMetric) ? roundInt(theWeather->temp) : roundInt(CToF(theWeather->temp)));
-      setFriendlyTime(friendlyTime,sizeof(friendlyTime),now());
-      tft.drawString(friendlyTime,TFT_WIDTH_HALF - (tft.textWidth(friendlyTime,4)/2),90,4);
     }
 
   }
@@ -463,6 +477,7 @@ void displayUpdate(WeatherData* theWeather) {
 
       setFriendlyDate(friendlyDate,sizeof(friendlyDate),theWeather->timestamp);
       tft.printf("Date: %s\n",friendlyDate);
+
       tft.printf("Min:  %d%s\n",(isMetric) ? roundInt(theWeather->tempMin) : roundInt(CToF(theWeather->tempMin)),(isMetric) ? "C" : "F");
       tft.printf("Max:  %d%s\n",(isMetric) ? roundInt(theWeather->tempMax) : roundInt(CToF(theWeather->tempMax)),(isMetric) ? "C" : "F");
       tft.printf("Desc: %s\n",theWeather->description);
@@ -473,19 +488,20 @@ void displayUpdate(WeatherData* theWeather) {
     }
     else {
       if (theWeather->type == FORECAST_TODAY) {
-        tft.drawString("Today",40,0,4);
+        displayHeading("Today");
       }
       else {
-        tft.drawString("Tomorrow",25,0,4);
+        displayHeading("Tomorrow");
       }
-      snprintf(filepath,sizeof(filepath),"%s%s%s","/icons/",theWeather->icon,".bmp");
-      drawBmp(&tft,filepath,10,30);
+      displayBMP(theWeather->icon);
+      tft.setTextDatum(TL_DATUM);
       snprintf(tBuffer,sizeof(tBuffer),"Min: %d",(isMetric) ? roundInt(theWeather->tempMin) : roundInt(CToF(theWeather->tempMin)));
       tft.drawString(tBuffer,100,35,2);
       snprintf(tBuffer,sizeof(tBuffer),"Max: %d",(isMetric) ? roundInt(theWeather->tempMax) : roundInt(CToF(theWeather->tempMax)));
       tft.drawString(tBuffer,100,55,2);
+      tft.setTextDatum(TC_DATUM);
       snprintf(tBuffer,sizeof(tBuffer),"%s",theWeather->description);
-      tft.drawString(tBuffer,TFT_WIDTH_HALF - (tft.textWidth(tBuffer,2)/2),90,2);
+      tft.drawString(tBuffer,TFT_WIDTH_HALF,90,2);
     }
   }
 
@@ -718,10 +734,6 @@ void loop() {
   if ((millis() - lastUpdateTime) > DISPLAY_UPDATE_INTERVAL) {
     shouldQuery = true;
   }
-  if ((currentMode == CURRENT) && (prevMin != minute(now()))) {
-    prevMin = minute(now());
-    shouldUpdate = true;
-  }
   if (shouldQuery) {
     getCurrentWeather(CITY_ID,&weatherCurrent);
     getForecastWeather(CITY_ID,&weatherForecastToday, &weatherForecastTomorrow);
@@ -742,6 +754,12 @@ void loop() {
         break;
     }
     firstrun = false;
+  }
+  else {
+    if ((currentMode == CURRENT) && (prevMin != minute(now()))) {
+      prevMin = minute(now());
+      displayTime();
+    }
   }
 
   delay(10);
